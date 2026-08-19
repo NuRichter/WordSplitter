@@ -1,0 +1,9 @@
+# WordSplitter runtime and build dependencies (Windows 11 64-bit).
+#
+# pywin32 provides the COM bridge to Microsoft Word, which is the pagination
+# authority used by this application. The GUI uses tkinter, which ships with
+# the official CPython installer for Windows and therefore needs no entry here.
+pywin32>=306
+
+# Build only. Not required to run the application from source.
+pyinstaller>=6.6
