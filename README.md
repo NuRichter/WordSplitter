@@ -1,5 +1,13 @@
 # WordSplitter
 
+> [!IMPORTANT]
+> **Tercatat resmi pada Direktorat Jenderal Kekayaan Intelektual (DJKI), Kementerian Hukum Republik Indonesia.**
+> Nomor pencatatan ciptaan: **`<NOMOR>`** · Pencipta dan Pemegang Hak Cipta: **Ibnu Khoirul Anwar (NuRichter)** · Tanggal pencatatan: **`<TANGGAL>`**
+> Verifikasi keaslian surat pencatatan: **https://hakcipta.dgip.go.id/legal/c/MDAxNDY0NzM2**
+
+[![Hak Cipta DJKI](https://img.shields.io/badge/Hak%20Cipta-DJKI%20Terdaftar-0A7B3E?style=flat-square)](https://hakcipta.dgip.go.id/legal/c/MDAxNDY0NzM2)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+
 Aplikasi *desktop* Windows 11 untuk memisahkan satu dokumen Microsoft Word `.docx` menjadi dua dokumen berdasarkan posisi tengah antara dua halaman yang dipilih pengguna.
 
 Aplikasi ini hanya memiliki satu fungsi. Tidak ada konversi format, tidak ada penyuntingan isi, tidak ada fitur tambahan.
