@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > **Tercatat resmi pada Direktorat Jenderal Kekayaan Intelektual (DJKI), Kementerian Hukum Republik Indonesia.**
-> Nomor pencatatan ciptaan: **`<NOMOR>`** · Pencipta dan Pemegang Hak Cipta: **Ibnu Khoirul Anwar (NuRichter)** · Tanggal pencatatan: **`<TANGGAL>`**
+> Nomor pencatatan ciptaan: **`EC002026162898`** · Pencipta dan Pemegang Hak Cipta: **Ibnu Khoirul Anwar (NuRichter)** · Tanggal pencatatan: **` 2 September 2026`**
 > Verifikasi keaslian surat pencatatan: **https://hakcipta.dgip.go.id/legal/c/MDAxNDY0NzM2**
 
 [![Hak Cipta DJKI](https://img.shields.io/badge/Hak%20Cipta-DJKI%20Terdaftar-0A7B3E?style=flat-square)](https://hakcipta.dgip.go.id/legal/c/MDAxNDY0NzM2)
