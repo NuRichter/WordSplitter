@@ -1,21 +1,26 @@
 """Validation rules for input files, page selection and output file names.
 
 Every function here is pure and deterministic, which makes the rules auditable
-and testable without Microsoft Word.
+and testable without Microsoft Word. Failures raise ValidationError with a
+locale key; parameters named "label" hold a locale key themselves and are
+translated by the GUI before rendering.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
+from errors import AppError, ValidationError
 from utils import (
     DOCX_EXTENSION,
+    WORD_MAX_PATH,
+    check_docx_container,
+    check_readable,
     ensure_docx_extension,
-    file_is_readable,
-    is_valid_docx_container,
 )
 
 WINDOWS_INVALID_CHARS = set('\\/:*?"<>|')
@@ -23,13 +28,10 @@ WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
+    "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
 }
 MAX_STEM_LENGTH = 180
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
-
-
-class ValidationError(Exception):
-    """Raised when user supplied data violates a documented rule."""
 
 
 @dataclass(frozen=True)
@@ -46,57 +48,62 @@ class SplitPlan:
     total_pages: int
 
     @property
+    def part_one(self) -> Tuple[int, int]:
+        return 1, self.split_page - 1
+
+    @property
+    def part_two(self) -> Tuple[int, int]:
+        return self.split_page, self.total_pages
+
+    @property
     def description(self) -> str:
         return (
-            f"Part 1 = halaman 1-{self.split_page - 1}, "
-            f"Part 2 = halaman {self.split_page}-{self.total_pages}"
+            f"Part 1 = pages 1-{self.split_page - 1}, "
+            f"Part 2 = pages {self.split_page}-{self.total_pages}"
         )
 
 
 def validate_input_file(raw_path: str) -> Path:
     """Validate the selected document and return its resolved path."""
-    if not raw_path or not raw_path.strip():
-        raise ValidationError("Belum ada file yang dipilih.")
+    if not raw_path or not str(raw_path).strip():
+        raise ValidationError("err.no_file")
 
     path = Path(raw_path).expanduser()
     try:
         path = path.resolve(strict=False)
-    except OSError as exc:
-        raise ValidationError(f"Path file tidak valid: {exc}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError("err.not_found", detail=str(exc)) from exc
 
     if path.suffix.lower() != DOCX_EXTENSION:
-        raise ValidationError(
-            "Hanya file dengan ekstensi .docx yang didukung. "
-            "File .doc, .rtf, .odt dan .pdf tidak dapat diproses."
-        )
+        raise ValidationError("err.not_docx_ext")
     if not path.exists():
-        raise ValidationError("File tidak ditemukan. Kemungkinan telah dipindahkan atau dihapus.")
+        raise ValidationError("err.not_found")
     if not path.is_file():
-        raise ValidationError("Path yang dipilih bukan sebuah file.")
+        raise ValidationError("err.not_a_file")
 
-    readable, reason = file_is_readable(path)
-    if not readable:
-        raise ValidationError(reason)
-
-    valid, reason = is_valid_docx_container(path)
-    if not valid:
-        raise ValidationError(reason)
-
+    try:
+        check_readable(path)
+        check_docx_container(path)
+    except AppError as exc:
+        raise ValidationError(exc.key, exc.detail, **exc.params) from None
     return path
 
 
 def parse_page_number(raw: str, label: str) -> int:
-    """Convert user text into a positive page index."""
-    text = (raw or "").strip()
+    """Convert user text into a positive page index.
+
+    Any Unicode decimal digits are accepted (Arabic-Indic, Persian, Devanagari,
+    full width), because people type numbers with the keyboard of their
+    language. Python's int() maps all of them to the same value.
+    """
+    text = unicodedata.normalize("NFKC", raw or "").strip()
     if not text:
-        raise ValidationError(f"{label} belum diisi.")
+        raise ValidationError("err.page_empty", label=label)
     if not re.fullmatch(r"[+-]?\d+", text):
-        raise ValidationError(f"{label} harus berupa angka bulat.")
+        raise ValidationError("err.page_not_int", label=label)
     value = int(text)
-    if value < 0:
-        raise ValidationError(f"{label} tidak boleh bernilai negatif.")
-    if value == 0:
-        raise ValidationError(f"{label} tidak boleh bernilai 0. Penomoran halaman dimulai dari 1.")
+    if value < 1:
+        raise ValidationError("err.page_zero", label=label)
     return value
 
 
@@ -112,96 +119,65 @@ def compute_split_plan(page_a: int, page_b: int, total_pages: int) -> SplitPlan:
     General rule: split_page = floor((A + B) / 2) + 1.
     """
     if total_pages < 2:
-        raise ValidationError(
-            "Dokumen hanya memiliki satu halaman sehingga tidak dapat dipisah."
-        )
+        raise ValidationError("err.single_page")
+    for label, value in (("label.page_a", page_a), ("label.page_b", page_b)):
+        if value > total_pages:
+            raise ValidationError("err.page_out_of_range", label=label, value=value, total=total_pages)
     if page_a == page_b:
-        raise ValidationError("Page A dan Page B tidak boleh sama.")
+        raise ValidationError("err.page_same")
 
     low, high = (page_a, page_b) if page_a < page_b else (page_b, page_a)
-
-    for label, value in (("Page A", page_a), ("Page B", page_b)):
-        if value > total_pages:
-            raise ValidationError(
-                f"{label} = {value} berada di luar rentang dokumen. "
-                f"Dokumen memiliki {total_pages} halaman."
-            )
-
     split_page = (low + high) // 2 + 1
     if split_page < 2 or split_page > total_pages:
-        raise ValidationError(
-            "Titik pisah yang dihitung berada di luar rentang dokumen. "
-            "Pilih kombinasi halaman lain."
-        )
-
-    return SplitPlan(
-        page_a=page_a, page_b=page_b, split_page=split_page, total_pages=total_pages
-    )
+        raise ValidationError("err.split_out_of_range")
+    return SplitPlan(page_a=page_a, page_b=page_b, split_page=split_page, total_pages=total_pages)
 
 
 def validate_output_name(raw: str, label: str) -> str:
     """Validate a file name against Windows naming rules and normalise it."""
-    text = (raw or "").strip()
+    text = unicodedata.normalize("NFC", raw or "").strip()
     if not text:
-        raise ValidationError(f"{label} tidak boleh kosong.")
+        raise ValidationError("err.name_empty", label=label)
     if _CONTROL_CHARS.search(text):
-        raise ValidationError(f"{label} mengandung karakter kontrol yang tidak diizinkan.")
+        raise ValidationError("err.name_control", label=label)
 
     offending = sorted({ch for ch in text if ch in WINDOWS_INVALID_CHARS})
     if offending:
-        raise ValidationError(
-            f"{label} mengandung karakter yang dilarang Windows: "
-            + " ".join(offending)
-        )
+        raise ValidationError("err.name_invalid_chars", label=label, chars=" ".join(offending))
 
     name = ensure_docx_extension(text)
     stem = name[: -len(DOCX_EXTENSION)]
 
     if not stem.strip():
-        raise ValidationError(f"{label} tidak boleh hanya berisi ekstensi.")
+        raise ValidationError("err.name_only_ext", label=label)
     if stem != stem.rstrip(" ."):
-        raise ValidationError(f"{label} tidak boleh diakhiri spasi atau titik.")
-    if stem.upper() in WINDOWS_RESERVED_NAMES:
-        raise ValidationError(
-            f"{label} menggunakan nama yang dicadangkan Windows: {stem}."
-        )
+        raise ValidationError("err.name_trailing", label=label)
+    if stem.split(".")[0].strip().upper() in WINDOWS_RESERVED_NAMES:
+        raise ValidationError("err.name_reserved", label=label, name=stem)
     if len(stem) > MAX_STEM_LENGTH:
-        raise ValidationError(
-            f"{label} terlalu panjang. Maksimum {MAX_STEM_LENGTH} karakter."
-        )
+        raise ValidationError("err.name_too_long", label=label, max=MAX_STEM_LENGTH)
     return name
 
 
-def resolve_output_paths(
-    source: Path, name_one: str, name_two: str
-) -> Tuple[Path, Path]:
-    """Validate both names and resolve them inside the source directory."""
-    first = validate_output_name(name_one, "File 1 Name")
-    second = validate_output_name(name_two, "File 2 Name")
+def resolve_output_paths(source: Path, directory: Path, name_one: str, name_two: str) -> Tuple[Path, Path]:
+    """Validate both names and resolve them inside the destination directory."""
+    first = validate_output_name(name_one, "label.name1")
+    second = validate_output_name(name_two, "label.name2")
 
-    directory = source.parent
     path_one = directory / first
     path_two = directory / second
 
-    if str(path_one).lower() == str(path_two).lower():
-        raise ValidationError(
-            "File 1 dan File 2 menghasilkan path output yang sama. "
-            "Gunakan nama yang berbeda."
-        )
-    for path, label in ((path_one, "File 1"), (path_two, "File 2")):
-        if str(path).lower() == str(source).lower():
-            raise ValidationError(
-                f"{label} memiliki nama yang sama dengan file asli. "
-                "Hal ini akan menimpa dokumen sumber, gunakan nama lain."
-            )
-        if len(str(path)) > 255:
-            raise ValidationError(
-                f"Path output untuk {label} melebihi batas panjang yang aman."
-            )
+    if str(path_one).casefold() == str(path_two).casefold():
+        raise ValidationError("err.names_same")
+    for path, label in ((path_one, "label.name1"), (path_two, "label.name2")):
+        if str(path).casefold() == str(source).casefold():
+            raise ValidationError("err.name_is_source", label=label)
+        if len(str(path)) > WORD_MAX_PATH:
+            raise ValidationError("err.output_path_too_long")
     return path_one, path_two
 
 
-def existing_outputs(path_one: Path, path_two: Path) -> list[Path]:
+def existing_outputs(path_one: Path, path_two: Path) -> list:
     """Return the output paths that already exist on disk."""
     return [path for path in (path_one, path_two) if path.exists()]
 
@@ -209,12 +185,6 @@ def existing_outputs(path_one: Path, path_two: Path) -> list[Path]:
 def estimate_required_space(source_size: int) -> int:
     """Conservative estimate of the disk space needed by the whole operation.
 
-    Two temporary copies plus two final files, plus a safety margin.
+    One working copy, two parts and two staged final files, plus a margin.
     """
-    return source_size * 4 + 16 * 1024 * 1024
-
-
-def describe_page_selection(page_a: Optional[int], page_b: Optional[int]) -> str:
-    if page_a is None or page_b is None:
-        return "belum ditentukan"
-    return f"Page A = {page_a}, Page B = {page_b}"
+    return source_size * 5 + 16 * 1024 * 1024

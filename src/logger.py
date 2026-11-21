@@ -1,9 +1,10 @@
 """Logging subsystem for WordSplitter.
 
 Logs are written to a rotating file inside the per-user application data
-directory. Logging must never be able to break the application, therefore every
-handler installation is guarded and falls back to a temporary directory, and
-finally to a no-op handler.
+directory. The GUI and the worker process each own their own file, so the two
+never fight over a rotation. Logging must never be able to break the
+application: every handler installation is guarded and falls back to the temp
+directory, and finally to a no-op handler.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-APP_NAME = "WordSplitter"
-LOG_FILE_NAME = "wordsplitter.log"
+from app_info import APP_NAME
+
+GUI_LOG = "wordsplitter.log"
+WORKER_LOG = "worker.log"
 MAX_BYTES = 1_000_000
 BACKUP_COUNT = 3
 
@@ -26,9 +29,7 @@ _LOG_PATH: Optional[Path] = None
 
 def app_data_dir() -> Path:
     """Return the writable per-user data directory for the application."""
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    if not base:
-        base = tempfile.gettempdir()
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or tempfile.gettempdir()
     return Path(base) / APP_NAME
 
 
@@ -37,53 +38,45 @@ def log_file_path() -> Optional[Path]:
     return _LOG_PATH
 
 
-def _build_file_handler(directory: Path) -> logging.Handler:
+def _build_file_handler(directory: Path, file_name: str) -> logging.Handler:
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / LOG_FILE_NAME
+    path = directory / file_name
     handler = logging.handlers.RotatingFileHandler(
-        path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+        path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8", delay=True
     )
     handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(threadName)-12s | %(name)s | %(message)s"
-        )
+        logging.Formatter("%(asctime)s | %(levelname)-7s | %(process)d | %(threadName)s | %(name)s | %(message)s")
     )
     global _LOG_PATH
     _LOG_PATH = path
     return handler
 
 
-def setup_logging(level: int = logging.INFO) -> logging.Logger:
-    """Configure the root logger. Safe to call more than once."""
+def setup_logging(file_name: str = GUI_LOG, level: int = logging.INFO) -> logging.Logger:
+    """Configure the root logger once per process."""
     root = logging.getLogger()
     if getattr(root, "_wordsplitter_configured", False):
         return logging.getLogger(APP_NAME)
-
     root.setLevel(level)
 
     handler: Optional[logging.Handler] = None
-    for candidate in (app_data_dir() / "logs", Path(tempfile.gettempdir()) / APP_NAME):
+    for candidate in (app_data_dir() / "logs", Path(tempfile.gettempdir()) / APP_NAME / "logs"):
         try:
-            handler = _build_file_handler(candidate)
+            handler = _build_file_handler(candidate, file_name)
             break
         except Exception:  # noqa: BLE001 - logging must never abort startup
             handler = None
+    root.addHandler(handler or logging.NullHandler())
 
-    if handler is None:
-        handler = logging.NullHandler()
-
-    root.addHandler(handler)
-
-    # A console handler is only useful for the non frozen developer run.
-    if not getattr(sys, "frozen", False):
+    # A console handler only helps a developer running from source with a console.
+    if not getattr(sys, "frozen", False) and sys.stderr is not None and file_name == GUI_LOG:
         console = logging.StreamHandler(stream=sys.stderr)
         console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
         root.addHandler(console)
 
+    logging.raiseExceptions = False  # a broken log file must stay silent
     root._wordsplitter_configured = True  # type: ignore[attr-defined]
-    logger = logging.getLogger(APP_NAME)
-    logger.info("Logging initialised. Log file: %s", _LOG_PATH)
-    return logger
+    return logging.getLogger(APP_NAME)
 
 
 def get_logger(name: str = APP_NAME) -> logging.Logger:

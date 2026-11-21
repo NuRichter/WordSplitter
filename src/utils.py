@@ -1,4 +1,4 @@
-"""General purpose helpers shared across the application.
+"""General purpose helpers shared by the GUI and the worker.
 
 Nothing in this module depends on Microsoft Word or on the GUI toolkit, which
 keeps it unit testable on any platform.
@@ -8,13 +8,23 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
+import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
+
+from errors import AppError
 
 DOCX_EXTENSION = ".docx"
 REQUIRED_ZIP_ENTRIES = ("[Content_Types].xml", "word/document.xml")
+# Encrypted Office documents and legacy .doc files are OLE compound files.
+CFB_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+ZIP_SIGNATURE = b"PK"
+# Word cannot open paths longer than this, even on systems with long path support.
+WORD_MAX_PATH = 255
 
 
 @dataclass(frozen=True)
@@ -32,99 +42,115 @@ class FileInfo:
     def directory(self) -> Path:
         return self.path.parent
 
-    @property
-    def size_human(self) -> str:
-        return human_readable_size(self.size_bytes)
+
+@dataclass(frozen=True)
+class Fingerprint:
+    """Cheap identity of a file version: size plus modification time."""
+
+    size: int
+    mtime_ns: int
+
+    @classmethod
+    def of(cls, path: Path) -> "Fingerprint":
+        stat = path.stat()
+        return cls(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+    def as_list(self) -> list:
+        return [self.size, self.mtime_ns]
+
+    @classmethod
+    def from_list(cls, values) -> "Fingerprint":
+        return cls(size=int(values[0]), mtime_ns=int(values[1]))
 
 
-def human_readable_size(size: int) -> str:
-    """Render a byte count using binary multiples."""
+def format_size(size: int, units: Tuple[str, str, str, str, str] = ("B", "KB", "MB", "GB", "TB"),
+                decimal: str = ".") -> str:
+    """Render a byte count with binary multiples and a locale decimal mark."""
     if size < 0:
-        return "unknown"
-    units = ("B", "KB", "MB", "GB", "TB")
+        return "?"
     value = float(size)
     index = 0
     while value >= 1024.0 and index < len(units) - 1:
         value /= 1024.0
         index += 1
     if index == 0:
-        return f"{int(value)} {units[index]}"
-    return f"{value:.2f} {units[index]}"
+        return f"{int(value)} {units[0]}"
+    return f"{value:.2f}".replace(".", decimal) + f" {units[index]}"
 
 
-def is_valid_docx_container(path: Path) -> Tuple[bool, str]:
+def check_docx_container(path: Path) -> None:
     """Verify that a file is a structurally sound Office Open XML package.
 
-    This is a cheap structural check performed without Microsoft Word. It
-    detects truncated downloads, renamed .doc binaries and corrupted archives
-    before any COM call is attempted.
+    This runs before Word is involved at all. It catches truncated downloads,
+    renamed .doc binaries, password protected packages and damaged archives,
+    each with its own explanation, and raises AppError on the first problem.
     """
     try:
         if not path.is_file():
-            return False, "File tidak ditemukan."
-        if path.stat().st_size == 0:
-            return False, "File berukuran 0 byte."
+            raise AppError("err.not_found")
+        size = path.stat().st_size
+        if size == 0:
+            raise AppError("err.empty_file")
+        with path.open("rb") as handle:
+            head = handle.read(8)
+        if head.startswith(CFB_SIGNATURE):
+            # Either an old .doc renamed to .docx or an encrypted .docx package.
+            raise AppError("err.encrypted_or_legacy")
+        if not head.startswith(ZIP_SIGNATURE):
+            raise AppError("err.not_zip")
         with zipfile.ZipFile(path) as archive:
-            broken = archive.testzip()
-            if broken is not None:
-                return False, f"Arsip dokumen rusak pada entri '{broken}'."
             names = set(archive.namelist())
             for required in REQUIRED_ZIP_ENTRIES:
                 if required not in names:
-                    return False, (
-                        "Struktur dokumen tidak valid. "
-                        f"Entri wajib '{required}' tidak ditemukan."
-                    )
-    except zipfile.BadZipFile:
-        return False, (
-            "File bukan dokumen .docx yang valid. "
-            "Format lama .doc tidak didukung, simpan ulang sebagai .docx."
-        )
+                    raise AppError("err.zip_missing", entry=required)
+            # CRC check of the entries Word reads first; a full testzip of a
+            # large image heavy document would cost seconds for little gain.
+            for required in REQUIRED_ZIP_ENTRIES:
+                with archive.open(required) as entry:
+                    while entry.read(1 << 16):
+                        pass
+    except AppError:
+        raise
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError):
+        raise AppError("err.zip_corrupt") from None
     except PermissionError:
-        return False, "Akses ke file ditolak oleh sistem operasi."
+        raise AppError("err.in_use") from None
     except OSError as exc:
-        return False, f"File tidak dapat dibaca: {exc.strerror or exc}"
-    return True, ""
+        raise AppError("err.read_failed", detail=str(exc.strerror or exc)) from None
+    except Exception as exc:  # noqa: BLE001 - e.g. zlib errors from a damaged entry
+        raise AppError("err.zip_corrupt", detail=type(exc).__name__) from None
 
 
-def file_is_readable(path: Path) -> Tuple[bool, str]:
+def check_readable(path: Path) -> None:
     """Check that the file can be opened for reading right now."""
     try:
         with path.open("rb") as handle:
             handle.read(1)
     except PermissionError:
-        return False, (
-            "File sedang digunakan oleh aplikasi lain atau akses ditolak. "
-            "Tutup file tersebut di Microsoft Word lalu coba lagi."
-        )
+        raise AppError("err.in_use") from None
     except FileNotFoundError:
-        return False, "File tidak ditemukan. Kemungkinan telah dipindahkan atau dihapus."
+        raise AppError("err.not_found") from None
     except OSError as exc:
-        return False, f"File tidak dapat dibuka: {exc.strerror or exc}"
-    return True, ""
+        raise AppError("err.read_failed", detail=str(exc.strerror or exc)) from None
 
 
-def directory_is_writable(directory: Path) -> Tuple[bool, str]:
+def check_writable_directory(directory: Path) -> None:
     """Verify write permission by creating and removing a probe file."""
+    if not directory.is_dir():
+        raise AppError("err.dest_missing")
+    probe = directory / f".wordsplitter-probe-{uuid.uuid4().hex[:8]}.tmp"
     try:
-        if not directory.is_dir():
-            return False, "Direktori tujuan tidak ditemukan."
-        probe = directory / ".wordsplitter_write_probe.tmp"
         with probe.open("wb") as handle:
             handle.write(b"0")
-        probe.unlink(missing_ok=True)
     except PermissionError:
-        return False, (
-            "Direktori tujuan bersifat read-only atau akses ditolak. "
-            "Pindahkan dokumen ke folder lain lalu coba lagi."
-        )
+        raise AppError("err.dest_readonly") from None
     except OSError as exc:
-        return False, f"Direktori tujuan tidak dapat ditulis: {exc.strerror or exc}"
-    return True, ""
+        raise AppError("err.dest_readonly", detail=str(exc.strerror or exc)) from None
+    finally:
+        safe_unlink(probe)
 
 
 def free_space_bytes(directory: Path) -> Optional[int]:
-    """Return free space on the volume hosting the directory."""
     try:
         return shutil.disk_usage(directory).free
     except OSError:
@@ -132,26 +158,47 @@ def free_space_bytes(directory: Path) -> Optional[int]:
 
 
 def ensure_docx_extension(name: str) -> str:
-    """Append the .docx extension when the user omitted or mistyped it."""
+    """Append .docx when the user omitted it, normalising its case."""
     cleaned = name.strip()
     if cleaned.lower().endswith(DOCX_EXTENSION):
         return cleaned[: -len(DOCX_EXTENSION)] + DOCX_EXTENSION
     return cleaned + DOCX_EXTENSION
 
 
-def temp_sibling_path(target: Path, tag: str) -> Path:
-    """Build a unique temporary path on the same volume as the final target.
+def strip_docx_extension(name: str) -> str:
+    cleaned = name.strip()
+    if cleaned.lower().endswith(DOCX_EXTENSION):
+        return cleaned[: -len(DOCX_EXTENSION)]
+    return cleaned
 
-    Staying on the same volume is what makes the final commit an atomic
-    os.replace instead of a copy that can fail halfway through.
+
+def jobs_root() -> Path:
+    """Private scratch area for working copies. Short, local and ASCII only."""
+    return Path(tempfile.gettempdir()) / "WordSplitter"
+
+
+def new_job_dir() -> Path:
+    """Create a fresh, uniquely named job directory."""
+    root = jobs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"job-{os.getpid()}-{uuid.uuid4().hex[:10]}"
+    path.mkdir()
+    return path
+
+
+def unique_name(prefix: str, suffix: str = ".docx") -> str:
+    """A file name Word has never seen before.
+
+    Word remembers documents that were open when it was terminated and asks
+    about them the next time a file with that name is opened. That question
+    blocks automation, so every working file gets a name that is never reused.
     """
-    counter = 0
-    while True:
-        suffix = "" if counter == 0 else f"_{counter}"
-        candidate = target.parent / f"~wordsplitter_{tag}{suffix}_{os.getpid()}.tmp.docx"
-        if not candidate.exists():
-            return candidate
-        counter += 1
+    return f"{prefix}-{uuid.uuid4().hex[:12]}{suffix}"
+
+
+def temp_sibling_path(target: Path) -> Path:
+    """A unique hidden temporary name next to the final target (same volume)."""
+    return target.parent / f"~wordsplitter-{uuid.uuid4().hex[:12]}.tmp"
 
 
 def safe_unlink(path: Optional[Path]) -> None:
@@ -164,13 +211,8 @@ def safe_unlink(path: Optional[Path]) -> None:
         pass
 
 
-def word_owner_files(path: Path) -> list[Path]:
-    """Return the possible Word lock file names for a given document.
-
-    Word creates an owner file named "~$" followed by the document name with its
-    first two characters removed when the name is long enough. Both variants are
-    returned so that a crashed session does not leave debris behind.
-    """
+def word_owner_files(path: Path) -> list:
+    """Return the possible Word lock file names ("~$...") for a document."""
     name = path.name
     candidates = {f"~${name}"}
     if len(name) > 2:
@@ -178,13 +220,55 @@ def word_owner_files(path: Path) -> list[Path]:
     return [path.parent / candidate for candidate in candidates]
 
 
-def cleanup_temp_artifact(path: Optional[Path]) -> None:
-    """Remove a temporary document together with any Word lock file."""
+def remove_tree(path: Optional[Path], attempts: int = 20, delay: float = 0.15) -> bool:
+    """Remove a job directory, retrying while a terminated Word releases handles."""
     if path is None:
-        return
-    safe_unlink(path)
-    for owner in word_owner_files(path):
-        safe_unlink(owner)
+        return True
+    for _ in range(max(1, attempts)):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(delay)
+    return not path.exists()
+
+
+def remove_files(paths: Iterable[Optional[Path]], attempts: int = 20, delay: float = 0.15) -> None:
+    pending = [p for p in paths if p is not None]
+    for _ in range(max(1, attempts)):
+        remaining = []
+        for item in pending:
+            try:
+                item.unlink(missing_ok=True)
+            except OSError:
+                remaining.append(item)
+        if not remaining:
+            return
+        pending = remaining
+        time.sleep(delay)
+
+
+def copy_into_place(source: Path, final: Path, overwrite: bool) -> None:
+    """Copy a verified file into its final location as atomically as possible.
+
+    The bytes are written to a temporary sibling first, flushed to disk, and
+    only then renamed onto the final name. Copying (instead of moving) lets
+    the new file inherit the permissions of the destination folder.
+    """
+    staging = temp_sibling_path(final)
+    try:
+        with source.open("rb") as reader, staging.open("wb") as writer:
+            shutil.copyfileobj(reader, writer, 1 << 20)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if not overwrite and final.exists():
+            raise FileExistsError(str(final))
+        os.replace(staging, final)
+    except BaseException:
+        safe_unlink(staging)
+        raise
 
 
 def files_are_identical(first: Path, second: Path) -> bool:
@@ -194,8 +278,8 @@ def files_are_identical(first: Path, second: Path) -> bool:
             return False
         with first.open("rb") as fa, second.open("rb") as fb:
             while True:
-                chunk_a = fa.read(65536)
-                chunk_b = fb.read(65536)
+                chunk_a = fa.read(1 << 16)
+                chunk_b = fb.read(1 << 16)
                 if chunk_a != chunk_b:
                     return False
                 if not chunk_a:

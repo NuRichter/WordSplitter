@@ -1,10 +1,20 @@
-"""Orchestration of the split operation.
+"""Orchestration of analysis and split (runs inside the worker process).
 
-The engine follows a staged commit protocol. Every artefact is produced under a
-temporary name on the same volume as the destination, verified, and only then
-promoted to its final name with an atomic replace. The original document is
-never touched until both outputs exist and have been reopened successfully by
-Microsoft Word.
+Pipeline
+--------
+1. The source is checked without Word (readable, sound .docx package) and its
+   fingerprint is compared with the one the user saw during analysis.
+2. A byte copy of the source ("snapshot") is placed in a private job folder
+   under a name Word has never seen. Word only ever opens that snapshot, so
+   the user's file is never locked, never shown in Word's recent list and
+   never touched by Word's crash recovery, even when the user has it open.
+3. One Word session does everything: count pages, find the cut, build Part 1
+   on the already open snapshot, build Part 2 on a fresh open, check that
+   Word reopens both files.
+4. Results are committed transactionally: files already at the target names
+   are moved aside first, both parts are copied into place, and on any
+   failure the previous state is restored. The original is removed last, and
+   only into the Recycle Bin when the drive has one.
 """
 
 from __future__ import annotations
@@ -13,42 +23,54 @@ import logging
 import os
 import shutil
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import utils
 import validation
-from validation import SplitPlan, ValidationError
-from word_engine import (
-    PaginationError,
-    WordEngineError,
-    WordNotAvailableError,
-    WordSession,
-)
+import winsys
+from errors import AppError, OperationCancelled
+from validation import SplitPlan
 
 LOGGER = logging.getLogger("WordSplitter.split")
 
-ProgressCallback = Callable[[str], None]
+Emit = Callable[..., None]
 
-
-class OperationCancelled(Exception):
-    """Raised when the user cancelled the operation between two stages."""
-
-
-class SplitError(Exception):
-    """Any recoverable failure that must be reported to the user verbatim."""
+# Set while results are being copied into place. A cancel that arrives now is
+# deliberately ignored: stopping half way would be worse than finishing.
+COMMITTING = threading.Event()
 
 
 @dataclass
 class SplitRequest:
     source: Path
+    job_dir: Path
+    fingerprint: Optional[utils.Fingerprint]
+    total_pages: int
     page_a: int
     page_b: int
     output_one: Path
     output_two: Path
     delete_original: bool = False
     overwrite_allowed: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SplitRequest":
+        fingerprint = data.get("fingerprint")
+        return cls(
+            source=Path(data["source"]),
+            job_dir=Path(data["job_dir"]),
+            fingerprint=utils.Fingerprint.from_list(fingerprint) if fingerprint else None,
+            total_pages=int(data.get("total_pages") or 0),
+            page_a=int(data["page_a"]),
+            page_b=int(data["page_b"]),
+            output_one=Path(data["output_one"]),
+            output_two=Path(data["output_two"]),
+            delete_original=bool(data.get("delete_original")),
+            overwrite_allowed=bool(data.get("overwrite_allowed")),
+        )
 
 
 @dataclass
@@ -58,289 +80,238 @@ class SplitResult:
     output_two: Path
     pages_one: int
     pages_two: int
-    original_deleted: bool
-    warnings: List[str] = field(default_factory=list)
+    original_removed: str = "kept"  # kept | recycled | deleted | failed
+    warnings: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plan": [self.plan.page_a, self.plan.page_b, self.plan.split_page, self.plan.total_pages],
+            "output_one": str(self.output_one),
+            "output_two": str(self.output_two),
+            "pages_one": self.pages_one,
+            "pages_two": self.pages_two,
+            "original_removed": self.original_removed,
+            "warnings": self.warnings,
+        }
 
 
-class AnalysisResult:
-    """Outcome of the pagination analysis stage."""
-
-    def __init__(self, total_pages: int) -> None:
-        self.total_pages = total_pages
-
-
-def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
-    if cancel_event is not None and cancel_event.is_set():
+def _progress(emit: Optional[Emit], key: str, pct: int, cancel: Optional[threading.Event] = None) -> None:
+    if cancel is not None and cancel.is_set():
         raise OperationCancelled()
+    LOGGER.info("Stage %s (%d%%)", key, pct)
+    if emit is not None:
+        emit("progress", key=key, pct=pct)
 
 
-def _report(progress: Optional[ProgressCallback], message: str) -> None:
-    LOGGER.info(message)
-    if progress is not None:
-        progress(message)
+def _session_factory():
+    import word_engine
+
+    return word_engine.WordSession
 
 
-def analyze_document(
-    source: Path,
-    progress: Optional[ProgressCallback] = None,
-    cancel_event: Optional[threading.Event] = None,
-) -> AnalysisResult:
-    """Open the document with Word and report its rendered page count."""
-    _report(progress, "Memeriksa integritas dokumen...")
-    valid, reason = utils.is_valid_docx_container(source)
-    if not valid:
-        raise SplitError(reason)
+def _snapshot(source: Path, job_dir: Path, expected: Optional[utils.Fingerprint]) -> Path:
+    """Copy the source into the job folder and prove the copy is that version."""
+    for _attempt in range(3):
+        before = utils.Fingerprint.of(source)
+        if expected is not None and before != expected:
+            raise AppError("err.source_changed")
+        target = job_dir / utils.unique_name("source")
+        try:
+            shutil.copyfile(source, target)
+        except PermissionError:
+            raise AppError("err.in_use") from None
+        except OSError as exc:
+            raise AppError("err.read_failed", detail=str(exc.strerror or exc)) from None
+        if utils.Fingerprint.of(source) == before and target.stat().st_size == before.size:
+            return target
+        utils.safe_unlink(target)  # the file was being saved while we copied it
+    raise AppError("err.source_changed")
 
-    _check_cancel(cancel_event)
-    _report(progress, "Menjalankan Microsoft Word untuk menganalisis pagination...")
 
-    with WordSession() as session:
-        _check_cancel(cancel_event)
-        with session.open_document(source, read_only=True) as document:
+def analyze(source: Path, job_dir: Path, emit: Optional[Emit] = None,
+            job: Optional[winsys.KillOnCloseJob] = None, session_factory=None,
+            cancel: Optional[threading.Event] = None) -> Dict[str, Any]:
+    """Count the rendered pages of a document."""
+    _progress(emit, "progress.checking", 5, cancel)
+    utils.check_readable(source)
+    utils.check_docx_container(source)
+    fingerprint = utils.Fingerprint.of(source)
+
+    _progress(emit, "progress.copying", 10, cancel)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = _snapshot(source, job_dir, fingerprint)
+
+    factory = session_factory or _session_factory()
+    _progress(emit, "progress.starting_word", 20, cancel)
+    session = factory(job)
+    with session:
+        _progress(emit, "progress.opening", 45, cancel)
+        document = session.open(snapshot)
+        try:
+            _progress(emit, "progress.paginating", 70, cancel)
             pages = session.page_count(document)
-
-    _report(progress, f"Analisis selesai. Dokumen memiliki {pages} halaman.")
-    return AnalysisResult(total_pages=pages)
+        finally:
+            session.close_document(document)
+    LOGGER.info("Analysis: %s has %d pages.", source.name, pages)
+    return {"pages": pages, "fingerprint": fingerprint.as_list()}
 
 
 def _preflight(request: SplitRequest) -> None:
-    """Checks that must pass before Word is started at all."""
-    if not request.source.exists():
-        raise SplitError(
-            "File asli tidak ditemukan lagi. Kemungkinan telah dipindahkan, "
-            "diubah namanya, atau dihapus setelah dipilih."
-        )
+    source = request.source
+    if not source.exists():
+        raise AppError("err.not_found")
+    utils.check_readable(source)
+    utils.check_docx_container(source)
+    if request.fingerprint is not None and utils.Fingerprint.of(source) != request.fingerprint:
+        raise AppError("err.source_changed")
 
-    readable, reason = utils.file_is_readable(request.source)
-    if not readable:
-        raise SplitError(reason)
-
-    valid, reason = utils.is_valid_docx_container(request.source)
-    if not valid:
-        raise SplitError(reason)
-
-    writable, reason = utils.directory_is_writable(request.source.parent)
-    if not writable:
-        raise SplitError(reason)
-
-    source_size = request.source.stat().st_size
-    required = validation.estimate_required_space(source_size)
-    free = utils.free_space_bytes(request.source.parent)
-    if free is not None and free < required:
-        raise SplitError(
-            "Ruang disk tidak mencukupi untuk menyelesaikan operasi dengan aman. "
-            f"Dibutuhkan sekitar {utils.human_readable_size(required)}, "
-            f"tersedia {utils.human_readable_size(free)}."
-        )
+    destination = request.output_one.parent
+    utils.check_writable_directory(destination)
+    size = source.stat().st_size
+    needed = validation.estimate_required_space(size)
+    for folder in {destination, request.job_dir.parent}:
+        free = utils.free_space_bytes(folder)
+        if free is not None and free < needed:
+            raise AppError("err.disk_space", needed_bytes=needed, free_bytes=free)
 
     if not request.overwrite_allowed:
         conflicts = validation.existing_outputs(request.output_one, request.output_two)
         if conflicts:
-            raise SplitError(
-                "File output sudah ada: "
-                + ", ".join(path.name for path in conflicts)
-            )
+            raise AppError("err.outputs_exist", names=", ".join(p.name for p in conflicts))
 
 
-def _build_part(
-    session: WordSession,
-    source: Path,
-    temp_path: Path,
-    delete_start: int,
-    delete_end: int,
-    label: str,
-    progress: Optional[ProgressCallback],
-) -> None:
-    """Copy the source and remove the range that does not belong to this part."""
-    _report(progress, f"Menyiapkan {label}...")
+def _expect(warnings: List[Dict[str, Any]], label: str, actual: int, expected: int) -> None:
+    if actual != expected:
+        warnings.append({"key": "warn.pages_differ", "params": {"label": label, "actual": actual, "expected": expected}})
+
+
+def _commit(parts: List[tuple], overwrite: bool, emit: Optional[Emit]) -> None:
+    """Copy both verified parts into place; all or nothing."""
+    COMMITTING.set()
+    if emit is not None:
+        emit("commit")  # from here on the GUI no longer offers Cancel
+        time.sleep(0.15)  # let the GUI register that before any file moves
+    backups: List[tuple] = []
+    written: List[Path] = []
     try:
-        shutil.copy2(source, temp_path)
-    except OSError as exc:
-        raise SplitError(
-            f"Salinan kerja untuk {label} gagal dibuat: {exc.strerror or exc}"
-        ) from exc
+        for _source, final, _label in parts:
+            if final.exists():
+                if not overwrite:
+                    raise AppError("err.outputs_exist", names=final.name)
+                backup = utils.temp_sibling_path(final)
+                os.replace(final, backup)
+                backups.append((backup, final))
+        for source, final, label in parts:
+            try:
+                utils.copy_into_place(source, final, overwrite=False)
+            except PermissionError as exc:
+                raise AppError("err.commit_failed", detail=str(exc), label=label, name=final.name) from exc
+            except OSError as exc:
+                raise AppError("err.commit_failed", detail=str(exc.strerror or exc), label=label, name=final.name) from exc
+            written.append(final)
+    except BaseException:
+        for final in written:
+            utils.safe_unlink(final)
+        for backup, final in backups:
+            try:
+                os.replace(backup, final)
+            except OSError:
+                LOGGER.exception("Could not restore %s from %s", final, backup)
+        raise
+    for backup, _final in backups:
+        utils.safe_unlink(backup)
 
-    with session.open_document(temp_path, read_only=False) as document:
-        session.repaginate(document)
-        session.delete_range(document, delete_start, delete_end)
-        session.save_as_docx(document, temp_path)
-    _report(progress, f"{label} selesai dibentuk.")
 
-
-def _verify_part(session: WordSession, path: Path, label: str) -> int:
-    """Structural and semantic verification of a produced file."""
-    if not path.exists():
-        raise SplitError(f"{label} tidak ditemukan setelah proses penyimpanan.")
-    if path.stat().st_size == 0:
-        raise SplitError(f"{label} berukuran 0 byte sehingga dianggap gagal.")
-
-    valid, reason = utils.is_valid_docx_container(path)
-    if not valid:
-        raise SplitError(f"{label} bukan paket .docx yang valid. {reason}")
-
+def _remove_original(source: Path) -> str:
+    if winsys.drive_has_recycle_bin(str(source)):
+        if winsys.move_to_recycle_bin(str(source)):
+            return "recycled"
+        return "failed"
     try:
-        pages = session.verify_document(path)
-    except WordEngineError as exc:
-        raise SplitError(
-            f"{label} tidak dapat dibuka kembali oleh Microsoft Word untuk validasi.\n\n{exc}"
-        ) from exc
-    if pages < 1:
-        raise SplitError(f"{label} tidak memiliki halaman yang dapat dirender.")
-    return pages
+        source.unlink()
+        return "deleted"
+    except OSError:
+        return "failed"
 
 
-def _commit(temp_path: Path, final_path: Path, label: str) -> None:
-    """Promote a verified temporary file to its final name atomically."""
-    try:
-        os.replace(temp_path, final_path)
-    except PermissionError as exc:
-        raise SplitError(
-            f"{label} tidak dapat disimpan sebagai '{final_path.name}'. "
-            "File tujuan sedang terbuka di aplikasi lain atau izin folder tidak mencukupi."
-        ) from exc
-    except OSError as exc:
-        raise SplitError(
-            f"{label} gagal dipindahkan ke nama final: {exc.strerror or exc}"
-        ) from exc
-
-
-def perform_split(
-    request: SplitRequest,
-    progress: Optional[ProgressCallback] = None,
-    cancel_event: Optional[threading.Event] = None,
-) -> SplitResult:
+def split(request: SplitRequest, emit: Optional[Emit] = None,
+          job: Optional[winsys.KillOnCloseJob] = None, session_factory=None,
+          cancel: Optional[threading.Event] = None) -> SplitResult:
     """Execute the full split protocol and return a verified result."""
-    warnings: List[str] = []
-    temp_one: Optional[Path] = None
-    temp_two: Optional[Path] = None
-    committed_one = False
-    committed_two = False
-
-    _report(progress, "Memeriksa prasyarat...")
+    warnings: List[Dict[str, Any]] = []
+    _progress(emit, "progress.checking", 3, cancel)
     _preflight(request)
-    _check_cancel(cancel_event)
 
-    # A pre existing file at the Part 1 name belongs to the user. If the run
-    # fails after Part 1 has been committed, that file is left alone rather than
-    # deleted, because removing it would destroy data the user already had.
-    part_one_preexisted = request.output_one.exists()
+    _progress(emit, "progress.copying", 6, cancel)
+    request.job_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = _snapshot(request.source, request.job_dir, request.fingerprint)
+    temp_one = request.job_dir / utils.unique_name("part1")
+    temp_two = request.job_dir / utils.unique_name("part2")
 
-    try:
-        with WordSession() as session:
-            _check_cancel(cancel_event)
-
-            _report(progress, "Menganalisis pagination dokumen...")
-            with session.open_document(request.source, read_only=True) as document:
-                total_pages = session.page_count(document)
-                plan = validation.compute_split_plan(
-                    request.page_a, request.page_b, total_pages
-                )
-                split_offset = session.page_start_offset(document, plan.split_page)
-                content_start = int(document.Content.Start)
-                content_end = int(document.Content.End)
-
-            LOGGER.info(
-                "Rencana pisah: %s, offset karakter %d, rentang isi %d-%d",
-                plan.description,
-                split_offset,
-                content_start,
-                content_end,
-            )
-            _report(progress, f"Titik pisah ditentukan. {plan.description}.")
-            _check_cancel(cancel_event)
-
-            temp_one = utils.temp_sibling_path(request.output_one, "part1")
-            temp_two = utils.temp_sibling_path(request.output_two, "part2")
-
-            # Part 1 keeps the content before the split point.
-            _build_part(
-                session, request.source, temp_one,
-                split_offset, content_end, "Part 1", progress,
-            )
-            _check_cancel(cancel_event)
-
-            # Part 2 keeps the content from the split point onwards.
-            _build_part(
-                session, request.source, temp_two,
-                content_start, split_offset, "Part 2", progress,
-            )
-            _check_cancel(cancel_event)
-
-            _report(progress, "Memvalidasi hasil...")
-            pages_one = _verify_part(session, temp_one, "Part 1")
-            pages_two = _verify_part(session, temp_two, "Part 2")
-
-            # A silent failure of the delete step would produce two copies of
-            # the whole document. Both parts reaching the original page count is
-            # the signature of that failure.
-            if pages_one >= total_pages and pages_two >= total_pages:
-                raise SplitError(
-                    "Kedua file hasil masih memuat seluruh isi dokumen, sehingga "
-                    "pemisahan dianggap gagal. Proses dibatalkan dan tidak ada "
-                    "file yang ditulis."
-                )
-            if utils.files_are_identical(temp_one, temp_two):
-                warnings.append(
-                    "Kedua file hasil memiliki isi biner yang identik. "
-                    "Periksa hasilnya sebelum digunakan."
-                )
-
-        # Word is closed before the commit so that no handle remains open.
-        _check_cancel(cancel_event)
-        _report(progress, "Menyimpan file hasil...")
-        _commit(temp_one, request.output_one, "Part 1")
-        committed_one = True
-        _commit(temp_two, request.output_two, "Part 2")
-        committed_two = True
-
-    except OperationCancelled:
-        utils.cleanup_temp_artifact(temp_one if not committed_one else None)
-        utils.cleanup_temp_artifact(temp_two if not committed_two else None)
-        raise
-    except (SplitError, ValidationError):
-        utils.cleanup_temp_artifact(temp_one if not committed_one else None)
-        utils.cleanup_temp_artifact(temp_two if not committed_two else None)
-        if committed_one and not committed_two and not part_one_preexisted:
-            utils.safe_unlink(request.output_one)
-        raise
-    except WordNotAvailableError as exc:
-        utils.cleanup_temp_artifact(temp_one)
-        utils.cleanup_temp_artifact(temp_two)
-        raise SplitError(str(exc)) from exc
-    except (PaginationError, WordEngineError) as exc:
-        utils.cleanup_temp_artifact(temp_one if not committed_one else None)
-        utils.cleanup_temp_artifact(temp_two if not committed_two else None)
-        if committed_one and not committed_two and not part_one_preexisted:
-            utils.safe_unlink(request.output_one)
-        raise SplitError(str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - converted into a user level error
-        LOGGER.exception("Kegagalan tak terduga selama proses pemisahan.")
-        utils.cleanup_temp_artifact(temp_one if not committed_one else None)
-        utils.cleanup_temp_artifact(temp_two if not committed_two else None)
-        if committed_one and not committed_two and not part_one_preexisted:
-            utils.safe_unlink(request.output_one)
-        raise SplitError(
-            "Terjadi kesalahan tak terduga selama proses pemisahan. "
-            "Detail teknis telah dicatat pada file log."
-        ) from exc
-
-    original_deleted = False
-    if request.delete_original:
-        _report(progress, "Menghapus file asli...")
+    factory = session_factory or _session_factory()
+    _progress(emit, "progress.starting_word", 12, cancel)
+    session = factory(job)
+    with session:
+        _progress(emit, "progress.paginating", 22, cancel)
+        document = session.open(snapshot)
         try:
-            request.source.unlink()
-            original_deleted = True
-        except PermissionError:
-            warnings.append(
-                "File asli tidak dapat dihapus karena sedang digunakan oleh aplikasi "
-                "lain atau izin tidak mencukupi. Kedua file hasil tetap tersimpan "
-                "dengan benar."
-            )
-        except OSError as exc:
-            warnings.append(
-                "File asli tidak dapat dihapus: "
-                f"{exc.strerror or exc}. Kedua file hasil tetap tersimpan dengan benar."
-            )
+            total = session.page_count(document)
+            if request.total_pages and total != request.total_pages:
+                raise AppError("err.source_changed", detail=f"pages {request.total_pages} -> {total}")
+            plan = validation.compute_split_plan(request.page_a, request.page_b, total)
+            split_offset = session.page_start(document, plan.split_page)
+            LOGGER.info("Plan: %s, cut at character %d", plan.description, split_offset)
+
+            _progress(emit, "progress.part1", 40, cancel)
+            report_one = session.cut_keep_before(document, split_offset)
+            pages_one = session.page_count(document)
+            session.save_docx(document, temp_one)
+        finally:
+            session.close_document(document)
+
+        _progress(emit, "progress.part2", 62, cancel)
+        document = session.open(snapshot)
+        try:
+            report_two = session.cut_keep_from(document, split_offset)
+            pages_two = session.page_count(document)
+            session.save_docx(document, temp_two)
+        finally:
+            session.close_document(document)
+
+        _progress(emit, "progress.verifying", 82, cancel)
+        session.reopen_check(temp_one, "result.file1")
+        session.reopen_check(temp_two, "result.file2")
+
+    LOGGER.info("Part 1 steps: %s", getattr(report_one, "steps", []))
+    LOGGER.info("Part 2 steps: %s", getattr(report_two, "steps", []))
+    for path, label in ((temp_one, "result.file1"), (temp_two, "result.file2")):
+        try:
+            utils.check_docx_container(path)
+        except AppError as exc:
+            raise AppError("err.verify_failed", detail=exc.key, label=label) from None
+
+    if pages_one >= total and pages_two >= total:
+        raise AppError("err.both_full")
+    _expect(warnings, "result.file1", pages_one, plan.split_page - 1)
+    _expect(warnings, "result.file2", pages_two, total - plan.split_page + 1)
+    if getattr(report_one, "fields_unlinked", 0) or getattr(report_two, "fields_unlinked", 0):
+        warnings.append({"key": "warn.fields_unlinked", "params": {}})
+    if utils.files_are_identical(temp_one, temp_two):
+        warnings.append({"key": "warn.identical", "params": {}})
+
+    _progress(emit, "progress.saving", 92, cancel)
+    _commit(
+        [(temp_one, request.output_one, "result.file1"), (temp_two, request.output_two, "result.file2")],
+        request.overwrite_allowed,
+        emit,
+    )
+
+    original = "kept"
+    if request.delete_original:
+        _progress(emit, "progress.removing_original", 97)
+        original = _remove_original(request.source)
+        if original == "failed":
+            warnings.append({"key": "warn.delete_failed", "params": {}})
 
     result = SplitResult(
         plan=plan,
@@ -348,11 +319,9 @@ def perform_split(
         output_two=request.output_two,
         pages_one=pages_one,
         pages_two=pages_two,
-        original_deleted=original_deleted,
+        original_removed=original,
         warnings=warnings,
     )
-    LOGGER.info(
-        "Pemisahan berhasil. %s | Part 1: %d halaman | Part 2: %d halaman | original dihapus: %s",
-        plan.description, pages_one, pages_two, original_deleted,
-    )
+    LOGGER.info("Split done. %s | part1=%d part2=%d | original=%s | warnings=%s",
+                plan.description, pages_one, pages_two, original, warnings)
     return result
