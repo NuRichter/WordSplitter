@@ -7,99 +7,291 @@
 
 [![Hak Cipta DJKI](https://img.shields.io/badge/Hak%20Cipta-DJKI%20Terdaftar-0A7B3E?style=flat-square)](https://hakcipta.dgip.go.id/legal/c/MDAxNDY0NzM2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+![Versi](https://img.shields.io/badge/versi-2.0.0-185ABD?style=flat-square)
+![Bahasa](https://img.shields.io/badge/bahasa-30-0E7C66?style=flat-square)
 
-Aplikasi *desktop* Windows 11 untuk memisahkan satu dokumen Microsoft Word `.docx` menjadi dua dokumen berdasarkan posisi tengah antara dua halaman yang dipilih pengguna.
+Aplikasi *desktop* Windows untuk memisahkan satu dokumen Microsoft Word `.docx` menjadi dua file, tepat di batas halaman yang Anda pilih.
 
-Aplikasi ini hanya memiliki satu fungsi. Tidak ada konversi format, tidak ada penyuntingan isi, tidak ada fitur tambahan.
+Aplikasi ini hanya punya satu fungsi, dan fungsi itu dibuat sebenar dan seaman mungkin. Tidak ada konversi format, tidak ada penyuntingan isi, tidak ada fitur tambahan yang tidak perlu.
 
 ```
-Select File  →  Analyze  →  Page A & Page B  →  Process  →  Save
+Pilih file  →  Hitung halaman  →  Halaman A & Halaman B  →  Pisahkan  →  Dua file baru
 ```
+
+| Tema terang · Bahasa Indonesia | Tema gelap · English | Kanan-ke-kiri · العربية |
+|---|---|---|
+| ![WordSplitter tema terang](docs/screenshot-id-light.png) | ![WordSplitter tema gelap](docs/screenshot-en-dark.png) | ![WordSplitter bahasa Arab](docs/screenshot-ar-rtl.png) |
 
 ---
 
-## 1. Persyaratan sistem
+## Daftar isi
+
+1. [Apa yang baru di versi 2.0](#1-apa-yang-baru-di-versi-20)
+2. [Persyaratan sistem](#2-persyaratan-sistem)
+3. [Cara memakai](#3-cara-memakai)
+4. [Simulasi dengan dokumen dummy](#4-simulasi-dengan-dokumen-dummy)
+5. [Di mana tepatnya titik potong?](#5-di-mana-tepatnya-titik-potong)
+6. [Cara kerja di balik layar](#6-cara-kerja-di-balik-layar)
+7. [Jaminan keamanan data](#7-jaminan-keamanan-data)
+8. [Ketahanan terhadap kondisi nyata](#8-ketahanan-terhadap-kondisi-nyata)
+9. [Ringan saat idle, cepat saat bekerja](#9-ringan-saat-idle-cepat-saat-bekerja)
+10. [Bahasa dan tema](#10-bahasa-dan-tema)
+11. [Keterbatasan yang perlu diketahui](#11-keterbatasan-yang-perlu-diketahui)
+12. [Menjalankan dari sumber, pengujian, dan build](#12-menjalankan-dari-sumber-pengujian-dan-build)
+13. [Log dan pemecahan masalah](#13-log-dan-pemecahan-masalah)
+14. [Struktur proyek](#14-struktur-proyek)
+
+---
+
+## 1. Apa yang baru di versi 2.0
+
+**Hasil pemisahan yang benar-benar tepat.** Versi 1.0 diuji ulang pada dokumen nyata dan ditemukan beberapa cacat. Semuanya sudah diperbaiki dan dibuktikan dengan pengujian otomatis memakai Microsoft Word sungguhan.
+
+| Kasus | Versi 1.0 | Versi 2.0 |
+|---|---|---|
+| Dokumen dengan *page break* manual (`Ctrl+Enter`) | File 1 kelebihan satu halaman kosong di akhir | Jumlah halaman tepat |
+| Dokumen ber-*section* (sampul, halaman romawi, bab, lampiran *landscape*) | File 1 memakai *header*, margin, dan penomoran milik *section* terakhir | Setiap bagian mempertahankan *page setup*, *header*, *footer*, dan gaya penomorannya sendiri |
+| Titik potong tepat di pergantian *section* | File 1 berakhir dengan halaman kosong ber-*section* asing | Bersih, tanpa halaman tambahan |
+| Titik potong di tengah tabel panjang | File 1 kelebihan halaman kosong, baris judul tabel hilang di File 2 | Baris judul yang berulang ikut terbawa ke File 2 |
+| *Track Changes* aktif | Isi File 2 masih tersimpan di File 1 sebagai revisi "terhapus" | Penghapusan nyata, revisi asli milik bagian itu tetap utuh |
+| Titik potong di dalam daftar isi atau daftar pustaka Mendeley/Zotero | Gagal dengan pesan `Cannot edit Range` | Berhasil; *field* yang terpotong diubah menjadi teks biasa dan Anda diberi tahu |
+
+**Antarmuka baru dengan prinsip lama.** Tiga langkah yang sama (dokumen, halaman, hasil), ditambah:
+
+* gambaran visual titik potong yang langsung berubah saat Anda mengetik Halaman A dan B;
+* pilihan folder penyimpanan;
+* **Panduan** di dalam aplikasi yang bisa membuat dokumen latihan dan langsung mensimulasikan pemisahan;
+* **30 bahasa** yang ditulis seperti penutur asli, termasuk tata letak kanan-ke-kiri untuk Arab, Persia, dan Urdu;
+* **2 tema**, terang dan gelap, termasuk *title bar* Windows yang ikut gelap;
+* file asli yang dihapus masuk ke **Recycle Bin**, tidak langsung lenyap.
+
+**Arsitektur baru.** Jendela aplikasi dan pekerjaan Word kini berjalan di dua proses terpisah. Hasilnya, idle hampir tidak memakai CPU, `Cancel` berhenti seketika, dan Word tidak pernah tertinggal di latar belakang. Rinciannya ada di bagian 6, 8, dan 9.
+
+---
+
+## 2. Persyaratan sistem
 
 | Komponen | Persyaratan |
 |---|---|
-| Sistem operasi | Windows 11 64-bit (Windows 10 64-bit juga berfungsi, tetapi tidak diuji) |
-| Microsoft Word | **Wajib.** Word desktop 2016, 2019, 2021, atau Microsoft 365, terpasang dan berlisensi aktif |
-| Python | Hanya untuk *developer*. Versi 3.11 sampai 3.13. Pengguna akhir `.exe` tidak memerlukan Python |
-| Dependency | `pywin32` untuk *runtime*, `pyinstaller` untuk *build* |
+| Sistem operasi | Windows 10 atau 11, 64-bit |
+| Microsoft Word | **Wajib.** Word *desktop* 2016, 2019, 2021, 2024, atau Microsoft 365, terpasang dan sudah aktif |
+| Perangkat keras | Apa pun yang mampu menjalankan Word. Diuji dari laptop 1366×768 berskala 100% hingga layar 1080p berskala 125% |
+| Python | Hanya untuk *developer*: 3.11 sampai 3.14. Pengguna `.exe` tidak memerlukan Python |
 
-Microsoft Word versi *web* dan Microsoft Store *app* (UWP) tidak menyediakan antarmuka COM sehingga tidak dapat digunakan. Diperlukan instalasi Word desktop biasa (*Click-to-Run* atau MSI).
+Word versi *web* dan versi Microsoft Store lama tidak menyediakan antarmuka otomasi, jadi tidak dapat dipakai.
 
----
-
-## 2. Mengapa Microsoft Word diperlukan
-
-Format `.docx` menyimpan **aliran konten**, bukan halaman. Tidak ada satu pun elemen dalam `word/document.xml` yang menyatakan "di sini halaman 10 berakhir". Batas halaman dihitung pada saat *layout* oleh *rendering engine*, dan hasilnya bergantung pada metrik *font* yang terpasang, *printer driver* default, opsi kompatibilitas dokumen, serta versi Word itu sendiri.
-
-Konsekuensinya, tiga pendekatan alternatif yang lazim dipakai semuanya ditolak dalam desain ini.
-
-| Pendekatan | Alasan penolakan |
-|---|---|
-| `python-docx` dengan estimasi jumlah paragraf atau jumlah karakter per halaman | Tidak akurat. Kesalahan bertambah pada dokumen dengan tabel, gambar, *multi-column layout*, atau ukuran *font* campuran. Tidak ada jaminan posisi halaman sama sekali |
-| Menghitung `w:lastRenderedPageBreak` di dalam XML | Penanda ini hanya ditulis oleh Word saat terakhir kali dokumen dirender dan tidak dijamin ada, tidak dijamin mutakhir, dan hilang pada dokumen yang dibuat oleh *generator* pihak ketiga |
-| LibreOffice *headless* sebagai mesin pagination | Pagination LibreOffice berbeda dari Word pada dokumen kompleks. Konversi bolak balik juga berisiko mengubah *styles*, *numbering*, dan *content control* |
-
-Karena itu WordSplitter menggunakan **Microsoft Word COM automation** melalui `pywin32`. Word adalah satu satunya otoritas yang benar untuk pertanyaan "di karakter ke berapa halaman N dimulai" pada mesin Windows 11 tersebut.
+**Mengapa harus Word?** Berkas `.docx` menyimpan aliran teks, bukan halaman. Letak "halaman 10 berakhir" baru diketahui saat Word menata letak dokumen dengan *font*, *printer driver*, dan opsi kompatibilitas di komputer Anda. Menebak dari jumlah paragraf, membaca penanda `lastRenderedPageBreak`, atau memakai LibreOffice menghasilkan halaman yang berbeda dengan yang Anda lihat di Word. Karena itu WordSplitter bertanya langsung kepada Word.
 
 ---
 
-## 3. Pendekatan teknis pagination dan split
+## 3. Cara memakai
 
-### 3.1 Penentuan titik pisah
+1. Tekan **Pilih file Word…** dan pilih dokumen `.docx`. WordSplitter langsung menghitung halamannya dengan Word (biasanya 1–3 detik).
+2. Isi **Halaman A** dan **Halaman B**. Bilah berwarna di bawahnya langsung menunjukkan halaman mana yang masuk File 1 dan File 2.
+3. Beri nama kedua file. Ekstensi `.docx` ditambahkan otomatis. Tekan **Ubah…** bila ingin menyimpan di folder lain.
+4. Centang **Hapus file asli** hanya bila memang diinginkan. Opsi ini mati secara *default*.
+5. Tekan **Pisahkan**. Bila nama file sudah ada, Anda bisa memilih *Timpa* atau *Pakai nama lain*.
+6. Setelah selesai, tekan **Buka folder** untuk langsung melihat kedua file.
 
-1. Dokumen dibuka oleh instance Word tersendiri yang dibuat dengan `DispatchEx`, dalam mode `ReadOnly`, tidak terlihat, dan dengan `DisplayAlerts` dimatikan. Instance tersendiri memastikan jendela Word milik pengguna tidak terganggu dan tidak ikut tertutup.
-2. `Document.Repaginate()` dipanggil agar tata letak mutakhir.
-3. Jumlah halaman dibaca dari `Document.ComputeStatistics(wdStatisticPages)`.
-4. Posisi awal halaman diperoleh dari `Document.GoTo(What=wdGoToPage, Which=wdGoToAbsolute, Count=N).Start`. Nilai ini adalah *character offset* pada aliran konten dokumen, dipetakan langsung oleh mesin *layout* Word.
+Pintasan: `Ctrl+O` memilih file, `Enter` di kolom halaman atau nama memulai pemisahan, `Esc` membatalkan, `F1` membuka Panduan.
 
-### 3.2 Definisi "tengah antara Page A dan Page B"
+Selama proses berjalan, jendela tetap responsif. **Batal** menghentikan proses seketika, kapan pun, termasuk saat Word baru mulai dibuka. Pengecualiannya hanya pada sepersekian detik terakhir saat file hasil sedang disimpan; tahap itu sengaja diselesaikan agar tidak berhenti setengah jalan.
 
-Titik pisah berada pada batas halaman yang paling dekat dengan titik tengah Page A dan Page B. Aturan formalnya adalah
+---
 
-```
-split_page = floor((A + B) / 2) + 1
-Part 1 = halaman 1 .. split_page - 1
-Part 2 = halaman split_page .. halaman terakhir
-```
+## 4. Simulasi dengan dokumen dummy
 
-| Page A | Page B | Titik tengah | split_page | Hasil |
+Folder [`samples/`](samples) berisi tiga dokumen dummy yang mewakili kasus nyata. Anda bisa membukanya di WordSplitter dan mengikuti skenario di bawah. Dokumen pertama juga bisa dibuat dari dalam aplikasi: buka **Panduan** lalu tekan **Buat contoh dan coba**. WordSplitter akan membuat dokumen latihan dalam bahasa antarmuka Anda dan langsung mengisi Halaman A = 6 dan Halaman B = 7.
+
+![Panduan di dalam aplikasi](docs/screenshot-guide-id.png)
+
+Hasil di bawah diukur dengan Word 16 (Microsoft 365) pada Windows 11. Jumlah halaman dokumen 02 dan 03 bisa sedikit berbeda di komputer dengan *font* atau *printer driver* lain, tetapi perilakunya sama.
+
+### 4.1 `01-dasar-12-halaman.docx` (12 halaman, setiap judul diawali *page break*)
+
+| Halaman A | Halaman B | File 1 | File 2 | Catatan |
 |---|---|---|---|---|
-| 10 | 11 | 10,5 | 11 | Part 1 = 1-10, Part 2 = 11-akhir |
-| 10 | 12 | 11 | 12 | Part 1 = 1-11, Part 2 = 12-akhir |
-| 10 | 13 | 11,5 | 12 | Part 1 = 1-11, Part 2 = 12-akhir |
-| 1 | 2 | 1,5 | 2 | Part 1 = 1, Part 2 = 2-akhir |
+| 6 | 7 | halaman 1–6 (6 halaman) | halaman 7–12 (6 halaman) | Skenario latihan di Panduan |
+| 6 | 8 | halaman 1–7 (7 halaman) | halaman 8–12 (5 halaman) | Titik tengah jatuh di halaman 7, jadi halaman 7 ikut File 1 |
 
-Ketika titik tengah jatuh tepat pada sebuah halaman, seperti pada kasus A = 10 dan B = 12, halaman tengah tersebut dimasukkan ke Part 1. Konvensi ini dipilih karena deterministik dan konsisten untuk semua kombinasi, dan diterapkan sama persis pada setiap proses. Urutan Page A dan Page B dinormalisasi secara otomatis sehingga 11 dan 10 menghasilkan titik pisah yang sama dengan 10 dan 11.
+Setiap halaman dokumen ini menuliskan "Setelah dipisahkan, halaman ini masuk ke File 1/File 2", sehingga hasilnya mudah diperiksa dengan mata.
 
-### 3.3 Metode pemisahan
+### 4.2 `02-skripsi-section-toc-tabel.docx` (19 halaman, berbentuk skripsi)
 
-Dokumen **tidak pernah dibangun ulang dari nol**. Prosedurnya adalah sebagai berikut.
+Struktur: sampul (halaman 1, tanpa nomor) · bagian awal bernomor romawi berisi kata pengantar dan daftar isi (halaman 2–3, *header* "Bagian Awal") · Bab 1–5 bernomor arab mulai dari 1 (halaman 4–13, *header* "Isi Skripsi", ada catatan kaki) · lampiran *landscape* berisi tabel 90 baris dengan baris judul berulang (halaman 14–19, *header* "Lampiran").
 
-1. File asli disalin dua kali dengan `shutil.copy2` ke dua file sementara pada direktori yang sama.
-2. Salinan pertama dibuka oleh Word, lalu rentang karakter dari titik pisah sampai akhir dokumen dihapus. Hasilnya adalah Part 1.
-3. Salinan kedua dibuka oleh Word, lalu rentang karakter dari awal dokumen sampai titik pisah dihapus. Hasilnya adalah Part 2.
-4. Keduanya disimpan dengan `SaveAs2` pada format `wdFormatDocumentDefault` yang merupakan `.docx`.
+| Halaman A | Halaman B | File 1 | File 2 | Yang diperiksa |
+|---|---|---|---|---|
+| 3 | 4 | sampul + bagian awal (3 halaman) | Bab 1 sampai lampiran (16 halaman) | File 1 tetap bernomor romawi dan ber-*header* "Bagian Awal"; File 2 diawali "BAB 1" dengan *header* "Isi Skripsi" |
+| 9 | 10 | sampai Bab 3 (9 halaman) | Bab 4 sampai lampiran (10 halaman) | *Header* bab yang diwarisi dari *section* sebelumnya tetap muncul di File 2 |
+| 13 | 14 | sampai Bab 5 (13 halaman) | lampiran saja (6 halaman) | File 2 tetap *landscape* |
+| 16 | 17 | sampai tengah tabel (16 halaman) | sisa tabel (3 halaman) | File 2 dibuka dengan baris judul tabel "No · Responden · Skor · Keterangan" |
 
-Karena setiap keluaran berasal dari salinan biner file asli dan hanya kehilangan satu rentang konten, seluruh struktur dokumen yang tidak dihapus tetap utuh. *Styles*, *theme*, *numbering definition*, *table*, *image*, *hyperlink*, *bookmark*, *header*, *footer*, *page setup*, *section*, *font embedding*, dan *document metadata* dipertahankan oleh Word sendiri, bukan direkonstruksi oleh aplikasi ini.
+### 4.3 `03-lacak-perubahan.docx` (8 halaman, *Track Changes* aktif)
 
-### 3.4 Keterbatasan yang diketahui
+| Halaman A | Halaman B | File 1 | File 2 | Yang diperiksa |
+|---|---|---|---|---|
+| 4 | 5 | halaman 1–4 | halaman 5–8 | Isi File 2 benar-benar hilang dari File 1, bukan disimpan sebagai revisi. Dua revisi asli di halaman 1–4 tetap ada, dan setelan *Track Changes* tetap aktif di kedua file |
 
-Keterbatasan berikut bersifat inheren pada model dokumen Word dan tidak dapat dihilangkan oleh pendekatan mana pun.
-
-1. **Nomor halaman otomatis** pada Part 2 kembali dimulai dari 1, kecuali dokumen memang mengatur nomor awal secara eksplisit pada *section* tersebut.
-2. **Section break yang dihapus.** Bila rentang yang dihapus memuat *section break*, Word menggabungkan *section* yang berbatasan. Pada Part 2 hal ini berarti *header* dan *footer* yang berlaku adalah milik *section* yang tersisa. Perilaku ini identik dengan yang terjadi bila pengguna melakukan penghapusan yang sama secara manual di dalam Word.
-3. **Referensi silang, daftar isi, dan catatan kaki** yang menunjuk ke konten di bagian lain akan menjadi rusak setelah pemisahan, karena targetnya tidak lagi berada di dalam dokumen yang sama. Perbarui *field* tersebut dengan `Ctrl` + `A` lalu `F9` setelah pemisahan.
-4. **Penomoran daftar bertingkat** yang melintasi titik pisah akan melanjutkan penomoran dari definisi *numbering* yang diwarisi. Nomor awal pada Part 2 mungkin perlu disetel ulang secara manual.
-5. **Pagination bergantung pada mesin.** Dokumen yang sama dapat memiliki jumlah halaman berbeda pada komputer lain apabila *font* yang digunakan tidak terpasang atau *printer driver* default berbeda. Nomor halaman yang dimasukkan pengguna harus mengacu pada tampilan Word di komputer yang sama.
-6. **Dokumen terproteksi kata sandi** tidak dapat diproses karena Word akan meminta kredensial secara interaktif, dan mode otomasi menolak dialog tersebut.
+Semua skenario ini juga dijalankan otomatis oleh `tests/test_worker.py` dan alat laboratorium pengembang, dengan pemeriksaan jumlah halaman, *section*, *header*, orientasi, tabel, dan revisi.
 
 ---
 
-## 4. Menjalankan dari sumber Python
+## 5. Di mana tepatnya titik potong?
+
+Titik potong berada di batas halaman yang paling dekat dengan titik tengah Halaman A dan Halaman B.
+
+```
+halaman_awal_File_2 = ⌊(A + B) ÷ 2⌋ + 1
+File 1 = halaman 1 … halaman_awal_File_2 − 1
+File 2 = halaman_awal_File_2 … halaman terakhir
+```
+
+| A | B | Titik tengah | File 1 | File 2 |
+|---|---|---|---|---|
+| 10 | 11 | 10,5 | 1–10 | 11–akhir |
+| 10 | 12 | 11 | 1–11 | 12–akhir |
+| 10 | 13 | 11,5 | 1–11 | 12–akhir |
+| 1 | 2 | 1,5 | 1 | 2–akhir |
+
+Bila titik tengah jatuh tepat pada satu halaman (A = 10, B = 12), halaman itu ikut File 1. Urutan A dan B boleh terbalik; 11 dan 10 memberi hasil yang sama dengan 10 dan 11. Angka boleh diketik dengan digit Arab, Persia, Devanagari, atau angka lebar Jepang/Tiongkok.
+
+---
+
+## 6. Cara kerja di balik layar
+
+```
+┌──────────────────────────────┐        JSON lewat pipa        ┌──────────────────────────────┐
+│  Jendela (proses GUI)        │ ───── permintaan / batal ───▶ │  Worker (proses singkat)     │
+│  Tk saja · tanpa COM · idle  │ ◀──── kemajuan / hasil ────── │  pywin32 · COM · watchdog    │
+│  hampir 0 CPU                │                               │  hidup hanya selama 1 tugas  │
+└──────────────────────────────┘                               └──────────────┬───────────────┘
+                                                                              │ Job Object
+                                                                              ▼ kill-on-close
+                                                               ┌──────────────────────────────┐
+                                                               │  Microsoft Word tersembunyi  │
+                                                               │  hanya membuka salinan kerja │
+                                                               └──────────────────────────────┘
+```
+
+**Satu exe, dua peran.** `WordSplitter.exe` membuka jendela. Untuk setiap analisis atau pemisahan, exe yang sama dijalankan lagi sebagai *worker* dengan `--worker`. Worker memakai ulang folder ekstraksi milik jendela, jadi tidak ada ekstraksi ulang. Worker bekerja, melaporkan hasil, lalu keluar. Jendela tidak pernah memuat pywin32, COM, atau Word.
+
+**Alur satu kali pemisahan:**
+
+1. Dokumen diperiksa tanpa Word: bisa dibaca, berupa paket `.docx` yang sehat, tidak terenkripsi, dan belum berubah sejak dianalisis (sidik jari ukuran + waktu ubah).
+2. Dokumen disalin byte-demi-byte ke folder kerja pribadi dengan nama unik. **Word hanya membuka salinan ini**, tidak pernah file Anda. File asli tidak terkunci, tidak masuk daftar *Recent*, dan tidak ikut sistem pemulihan Word.
+3. Satu sesi Word melakukan semuanya: menghitung halaman, mencari posisi karakter awal halaman tujuan (`GoTo`), membentuk File 1 dari dokumen yang sudah terbuka, membentuk File 2 dari pembukaan kedua, lalu membuka ulang kedua hasil untuk memastikan Word sendiri bisa membacanya.
+4. Hasil dipindahkan ke folder tujuan secara transaksional (lihat bagian 7).
+
+**Cara memotong.** Dokumen tidak pernah dibangun ulang dari teks. Setiap hasil adalah salinan utuh yang hanya kehilangan satu rentang isi, sehingga *styles*, *theme*, penomoran, tabel, gambar, *hyperlink*, *bookmark*, catatan kaki, dan *metadata* dipertahankan oleh Word sendiri. Sebelum memotong, WordSplitter:
+
+* mematikan sementara *Track Changes* agar penghapusan nyata, lalu mengembalikan setelannya;
+* membuka kunci *restrict editing* tanpa kata sandi, lalu memasangnya kembali;
+* menyalin *page setup*, *header*, *footer*, dan penomoran *section* yang tersisa ke *section* terakhir, karena di Word tanda paragraf terakhir yang menentukan format *section* terakhir;
+* membuat *header* yang diwarisi dari *section* sebelumnya menjadi milik sendiri sebelum *section* sebelumnya dibuang;
+* memindahkan titik potong ke awal baris bila halaman dimulai di tengah baris tabel, dan mempertahankan baris judul tabel yang berulang;
+* membuang sisa *page break*, *section break*, atau *column break* di ujung File 1 yang menyebabkan halaman kosong;
+* bila Word menolak memotong di tengah *field* (daftar isi, daftar pustaka Zotero/Mendeley) atau *content control* terkunci, *field* itu diubah menjadi teks biasa dan Anda diberi peringatan.
+
+---
+
+## 7. Jaminan keamanan data
+
+```
+File asli  (hanya dibaca untuk disalin, tidak pernah dibuka Word)
+   ↓
+Salinan kerja dengan nama unik  →  Word menghitung dan memotong
+   ↓
+File 1 & File 2 sementara  →  dibuka ulang oleh Word  →  diperiksa sebagai paket .docx
+   ↓
+Commit transaksional ke folder tujuan
+   ↓
+File asli ke Recycle Bin (hanya bila diminta dan semua langkah di atas berhasil)
+```
+
+* Bila file tujuan sudah ada dan Anda memilih *Timpa*, file lama disisihkan dulu. Bila penyimpanan gagal di tengah jalan, file lama dikembalikan persis seperti semula.
+* File hasil ditulis ke nama sementara, di-*flush* ke disk, baru diganti nama secara atomik. Karena disalin, bukan dipindahkan, file baru mewarisi izin folder tujuan.
+* Hasil dianggap gagal bila kedua file masih memuat seluruh dokumen. Bila jumlah halaman hasil berbeda dari yang diharapkan, Anda diberi tahu.
+* Bila proses dibatalkan atau gagal, folder kerja dan semua file sementara dibersihkan. Folder kerja yang tertinggal karena listrik padam dibersihkan otomatis pada pemakaian berikutnya.
+* "Hapus file asli" memindahkan file ke **Recycle Bin** bila drive-nya punya Recycle Bin. Di drive jaringan atau USB, file dihapus permanen, dan hal ini disebutkan di dialog konfirmasi.
+* Ruang disk diperiksa sebelum mulai, baik di folder kerja maupun di folder tujuan.
+
+---
+
+## 8. Ketahanan terhadap kondisi nyata
+
+| Kondisi | Yang terjadi |
+|---|---|
+| Dokumen sedang terbuka dan sedang diedit di Word milik Anda | Tetap bisa diproses. WordSplitter membaca versi yang terakhir disimpan |
+| Word menampilkan dialog yang menunggu jawaban (misalnya "File In Use", pemulihan dokumen, aktivasi) | *Watchdog* mendeteksi jendela dialog pada instance Word milik WordSplitter dalam ±1,4 detik, menutup Word itu, lalu menampilkan judul dialog dalam pesan yang jelas. Tidak ada lagi aplikasi yang "hang" |
+| Word sibuk dan menolak panggilan (`RPC_E_CALL_REJECTED`) | Panggilan diulang otomatis hingga 2 menit |
+| Cache `gen_py` pywin32 rusak di komputer pengguna | Tidak berpengaruh, karena semua panggilan memakai *late binding* |
+| Pengguna menekan **Batal**, bahkan saat Word baru mulai | Word dihentikan dalam waktu kurang dari satu detik (terukur 0,04 detik di tengah pemisahan, 0,5 detik saat Word baru mulai), semua file sementara dibersihkan |
+| Jendela WordSplitter ditutup paksa lewat Task Manager atau komputer *crash* | Pipa ke worker tertutup, worker menghentikan Word-nya sendiri. Word juga terikat *Job Object* sehingga ikut mati bila worker mati |
+| Worker sendiri mogok | Jendela menampilkan pesan yang jelas, file asli tidak tersentuh |
+| Dokumen berkata sandi atau `.doc` lama yang diganti ekstensinya | Dikenali dari tanda tangan berkas sebelum Word dibuka |
+| Dokumen rusak | Dikenali dari pemeriksaan paket ZIP dan CRC, atau ditolak Word dengan pesan yang jelas |
+| Dokumen berubah setelah dianalisis | Dianalisis ulang otomatis, Anda diminta memastikan Halaman A dan B |
+| Folder tujuan tidak bisa ditulis, termasuk karena *Controlled folder access* | Dicek sebelum mulai, dengan saran tindakan |
+| Path terlalu panjang untuk Word | Word hanya membuka salinan kerja ber-path pendek; nama tujuan dibatasi agar tetap bisa dibuka Word |
+| Opsi Word milik Anda | Opsi yang diubah selama otomasi dikembalikan sebelum Word ditutup; *Normal.dotm* tidak pernah disimpan |
+| Layar kecil (1366×768 pada 100%) | Mode ringkas otomatis agar seluruh jendela tetap terlihat |
+
+---
+
+## 9. Ringan saat idle, cepat saat bekerja
+
+Diukur pada Windows 11, Python 3.14, setelah jendela tenang 6 detik. CPU diukur dengan `QueryProcessCycleTime` (median 5 kali), memori dengan *private bytes*.
+
+| Kondisi idle | v1.0 | v2.0 |
+|---|---|---|
+| Siklus CPU per 15 detik | 65,1 juta | **2,4 juta** (setara jendela Tk kosong, ±27× lebih hemat) |
+| *Timer* yang berjalan | polling 10× per detik | **tidak ada** |
+| Memori pribadi proses jendela | 22,4 MB | 24,0 MB |
+| Setelah satu kali pemisahan | pywin32 dan COM tetap termuat di proses jendela | proses jendela tetap bersih; worker sudah keluar |
+| Instance Word di latar belakang | ditutup setelah tugas | ditutup setelah tugas, dijamin oleh Job Object |
+
+Pada build `.exe` *onefile*, ada satu proses *bootloader* kecil tambahan dari PyInstaller (total memori pribadi sekitar 27 MB).
+
+Saat bekerja, waktu yang dirasakan dipangkas dengan beberapa cara:
+
+* Hasil dikirim ke jendela segera setelah file tersimpan. Penutupan Word, yang butuh sekitar 2,6 detik, berlangsung di latar belakang.
+* File 1 dibentuk langsung dari dokumen yang sudah terbuka untuk analisis, sehingga satu kali pembukaan dan penataan letak bisa dihemat.
+* Pemeriksaan ulang hasil hanya membuka file, tidak menata letak ulang seluruh dokumen.
+
+Pada dokumen contoh, analisis memakan 0,9–2,5 detik dan pemisahan 1,3–4,3 detik.
+
+---
+
+## 10. Bahasa dan tema
+
+Antarmuka tersedia dalam 30 bahasa. Bahasa awal mengikuti bahasa tampilan Windows, dan bisa diganti kapan saja dari menu di kanan atas. Teks ditulis seperti penutur asli, dengan istilah yang sama dengan Windows dan Office di bahasa tersebut.
+
+English · Bahasa Indonesia · Bahasa Melayu · Basa Jawa · Deutsch · Español · Filipino · Français · Italiano · Kiswahili · Nederlands · Polski · Português (Brasil) · Tiếng Việt · Türkçe · Русский · Українська · العربية · فارسی · اردو · हिन्दी · मराठी · বাংলা · தமிழ் · తెలుగు · ไทย · 简体中文 · 繁體中文 · 日本語 · 한국어
+
+* Setiap bahasa memakai *font* antarmuka Windows yang paling cocok untuk aksaranya: Segoe UI, Nirmala UI, Leelawadee UI, Microsoft YaHei UI, Microsoft JhengHei UI, Yu Gothic UI, atau Malgun Gothic.
+* Arab, Persia, dan Urdu memakai tata letak cermin kanan-ke-kiri. Kalimatnya disusun agar tetap terbaca benar di mesin teks Tk, misalnya rentang halaman ditulis "من الصفحة 1 إلى 24", bukan "1-24".
+* Satuan ukuran dan tanda desimal mengikuti bahasa, misalnya `1,50 Mo` dalam bahasa Prancis.
+* Dokumen latihan di Panduan dibuat dalam bahasa yang sedang dipakai, termasuk arah teks kanan-ke-kiri.
+
+Tema **Terang** dan **Gelap** tersedia. Pilihan awal mengikuti setelan Windows. Pilihan bahasa dan tema disimpan di `%LOCALAPPDATA%\WordSplitter\settings.json`.
+
+---
+
+## 11. Keterbatasan yang perlu diketahui
+
+Hal-hal berikut melekat pada cara Word menyimpan dokumen dan tidak dapat dihilangkan oleh pendekatan apa pun.
+
+1. **Nomor halaman otomatis** di File 2 dimulai lagi dari 1, kecuali *section*-nya memang diatur untuk memulai dari angka tertentu.
+2. **Daftar isi, referensi silang, dan catatan akhir** yang menunjuk ke bagian lain perlu diperbarui setelah pemisahan: tekan `Ctrl+A` lalu `F9`. *Field* yang terpotong tepat di titik potong sudah diubah menjadi teks biasa.
+3. **Penomoran daftar bertingkat** yang melintasi titik potong melanjutkan definisi penomoran yang ada. Nomor awal di File 2 mungkin perlu disetel ulang.
+4. **Halaman mengikuti komputer ini.** Dokumen yang sama bisa berbeda jumlah halamannya di komputer lain bila *font* atau *printer driver*-nya berbeda. Lihat nomor halaman di Word pada komputer yang sama.
+5. **Paragraf yang terpotong di tengah halaman.** Bila halaman tujuan dimulai di tengah paragraf, sisa paragraf itu menjadi paragraf pertama File 2 dan bisa mendapat inden baris pertama, sehingga tata letaknya sedikit bergeser. WordSplitter memberi tahu bila jumlah halaman hasil berbeda dari yang diharapkan.
+6. **Dokumen yang dikunci kata sandi** harus dibuka kuncinya di Word terlebih dahulu.
+
+---
+
+## 12. Menjalankan dari sumber, pengujian, dan build
 
 ```bat
 py -3 -m venv .venv
@@ -108,125 +300,98 @@ pip install -r requirements.txt
 py -3 src\main.py
 ```
 
-Menjalankan aplikasi pada sistem operasi selain Windows akan berhenti dengan pesan yang jelas, karena COM dan Microsoft Word tidak tersedia di sana.
+**Pengujian**
 
----
+```bat
+py -3 -m unittest discover -s tests -v
+```
 
-## 5. Build `.exe`
+| Berkas | Isi |
+|---|---|
+| `tests/test_core.py` | Aturan input, aritmetika titik potong untuk semua kombinasi halaman 2–39, nama file Windows, pemeriksaan paket `.docx`, utilitas berkas |
+| `tests/test_engine.py` | Alur pemisahan dengan sesi Word simulasi: snapshot, sidik jari, commit transaksional, *rollback*, pembatalan, Recycle Bin |
+| `tests/test_i18n.py` | Kelengkapan 30 bahasa, kecocokan *placeholder*, aturan RTL, nama file default yang valid |
+| `tests/test_gui.py` | Jendela dibangun dalam 30 bahasa × 2 tema, pratinjau, kontrol, mode ringkas, tidak ada *timer* saat idle, proses jendela tidak memuat COM |
+| `tests/test_worker.py` | Protokol worker lewat proses sungguhan, serta pemisahan dan pembatalan dengan Microsoft Word asli (dilewati otomatis bila Word tidak ada, atau bila `WS_SKIP_WORD=1`) |
+
+Rincian rencana uji dan temuan selama pengembangan ada di [TEST_PLAN.md](TEST_PLAN.md).
+
+**Build `.exe`**
 
 ```bat
 build.bat
 ```
 
-Skrip tersebut membuat *virtual environment* pada `build\venv`, memasang dependency, membersihkan hasil *build* sebelumnya, lalu menjalankan PyInstaller dalam mode `--onefile --windowed`. Hasil akhirnya adalah
+Skrip ini membuat *virtual environment* di `build\venv`, memasang dependensi, **menjalankan seluruh pengujian** (build berhenti bila ada yang gagal), lalu menjalankan PyInstaller menjadi `dist\WordSplitter.exe` (*onefile*, *windowed*, dengan ikon dan informasi versi).
 
+**Diagnostik tanpa jendela**
+
+```bat
+WordSplitter.exe --check "C:\path\dokumen.docx"
 ```
-dist\WordSplitter.exe
-```
 
-Executable bersifat mandiri. Pengguna akhir tidak perlu memasang Python maupun `pywin32`. Microsoft Word tetap wajib ada karena aplikasi ini menggunakan mesin pagination Word.
+Perintah ini menganalisis dokumen lewat jalur yang sama dengan jendela, lalu mencetak satu baris JSON berisi jumlah halaman, waktu tiap tahap, dan pesan kesalahan bila ada. Berguna untuk dukungan teknis dan *smoke test* hasil build.
 
-Beberapa produk antivirus menandai executable PyInstaller sebagai mencurigakan karena pola *self extraction*. Bila hal ini terjadi, tambahkan pengecualian untuk `dist\WordSplitter.exe` atau lakukan penandatanganan kode dengan sertifikat organisasi.
+**Alat pengembang** (memerlukan Pillow dan Word): `tools\make_samples.py` membuat ulang isi `samples/`, `tools\make_icon.py` membuat ikon, dan `tools\screenshot.py` mengambil tangkapan layar dalam bahasa dan tema apa pun.
+
+Beberapa antivirus menandai exe PyInstaller sebagai mencurigakan karena pola ekstraksi dirinya. Bila itu terjadi, tambahkan pengecualian atau tandatangani exe dengan sertifikat kode.
 
 ---
 
-## 6. Cara penggunaan
+## 13. Log dan pemecahan masalah
 
-1. Tekan `Select Word File` dan pilih dokumen `.docx`. Nama, lokasi, ukuran, dan status file ditampilkan.
-2. Aplikasi langsung menjalankan analisis. Status berubah menjadi `Analyzing document...` lalu jumlah halaman ditampilkan.
-3. Isi `Page A` dan `Page B`. Titik pisah berada di tengah antara keduanya.
-4. Isi `File 1 Name` dan `File 2 Name`. Ekstensi `.docx` ditambahkan otomatis.
-5. Centang `Delete original file` hanya bila file asli memang ingin dihapus. Secara *default* opsi ini tidak aktif.
-6. Tekan `Process`. Bila ada nama file yang bentrok, akan muncul dialog `File already exists.` dengan pilihan `Replace`, `Choose Another Name`, dan `Cancel`.
-7. Setelah selesai, kedua file hasil berada pada direktori yang sama dengan file asli.
-
-Selama proses berjalan, antarmuka tetap responsif karena seluruh pekerjaan berat dijalankan pada *worker thread*. Tombol `Cancel` menghentikan proses pada batas tahap berikutnya dan membersihkan seluruh file sementara.
-
----
-
-## 7. Jaminan integritas data
-
-Urutan operasi dirancang agar kegagalan pada titik mana pun tidak menghasilkan kehilangan data.
-
-```
-Original
-   ↓  (dibuka read-only, tidak pernah dimodifikasi)
-Analyze pagination
-   ↓
-Salin ke temporary Part 1  →  hapus rentang  →  simpan
-   ↓
-Salin ke temporary Part 2  →  hapus rentang  →  simpan
-   ↓
-Validasi Part 1 dan Part 2 (ada, ukuran > 0, paket .docx valid, dapat dibuka ulang oleh Word)
-   ↓
-Commit atomik dengan os.replace ke nama final
-   ↓
-Hapus original (hanya bila checkbox aktif dan seluruh langkah di atas berhasil)
-```
-
-Prinsip yang diterapkan.
-
-* File asli dibuka dalam mode `ReadOnly` dan tidak pernah menjadi sasaran operasi tulis.
-* Seluruh keluaran dibentuk pada nama sementara di *volume* yang sama dengan tujuan, sehingga promosi ke nama final adalah `os.replace` yang atomik pada NTFS.
-* Keberhasilan `save()` tidak dianggap sebagai bukti keberhasilan. Setiap keluaran dibuka kembali oleh Word dan dihitung ulang jumlah halamannya.
-* Bila kedua keluaran ternyata masih memuat seluruh isi dokumen, proses dinyatakan gagal dan tidak ada file final yang ditulis.
-* Bila proses gagal di tengah jalan, seluruh file sementara dan *lock file* Word dibersihkan.
-* Bila Part 1 sudah terpromosi lalu Part 2 gagal, Part 1 dihapus kembali, kecuali bila nama tersebut sudah ditempati file milik pengguna sebelum proses dimulai. Dalam kasus itu file pengguna dibiarkan apa adanya.
-* Ruang disk diperiksa sebelum proses dimulai, dengan estimasi konservatif sebesar empat kali ukuran dokumen ditambah margin.
-
----
-
-## 8. Log dan diagnostik
-
-Log ditulis ke
-
-```
-%LOCALAPPDATA%\WordSplitter\logs\wordsplitter.log
-```
-
-Bila direktori tersebut tidak dapat ditulis, log dialihkan ke `%TEMP%\WordSplitter\`. Lokasi aktif selalu ditampilkan pada bagian bawah jendela aplikasi.
-
-File log berotasi otomatis pada ukuran 1 MB dengan tiga berkas cadangan. Isi log mencakup waktu, file masukan dan ukurannya, halaman yang dipilih, rencana pemisahan beserta *character offset*, setiap tahap yang dijalankan, seluruh kesalahan beserta *traceback* teknis, dan hasil akhir proses.
-
-Pengguna tidak pernah melihat *traceback* mentah. Setiap kesalahan disajikan sebagai pesan yang dapat dibaca manusia, dan detail teknisnya disimpan ke log.
-
----
-
-## 9. Troubleshooting
+Log ada di `%LOCALAPPDATA%\WordSplitter\logs\`: `wordsplitter.log` untuk jendela dan `worker.log` untuk pekerjaan Word. Masing-masing berotasi pada 1 MB dengan tiga cadangan. Klik tulisan **Folder log** di bagian bawah jendela untuk membukanya. Pengguna tidak pernah melihat *traceback* mentah; detail teknis tersedia lewat tombol **Detail** di dialog kesalahan.
 
 | Gejala | Penyebab dan tindakan |
 |---|---|
-| `Microsoft Word desktop tidak dapat dijalankan` | Word tidak terpasang, berupa versi Store atau *web*, atau lisensinya belum aktif. Buka Word secara manual satu kali untuk menyelesaikan aktivasi |
-| `Microsoft Word tidak dapat membuka dokumen ini` | Dokumen terproteksi kata sandi, rusak, atau sedang dikunci proses lain. Buka dokumen di Word, simpan ulang sebagai `.docx` baru, lalu ulangi |
-| `File bukan dokumen .docx yang valid` | File sebenarnya berformat `.doc` lama atau hanya diubah ekstensinya. Buka di Word lalu simpan sebagai `.docx` |
-| Jumlah halaman berbeda dari tampilan Word milik pengguna | *Printer driver* default atau *font* berbeda. Pastikan dokumen dibuka pada komputer yang sama dengan yang dipakai untuk menentukan nomor halaman |
-| Aplikasi tampak lambat pada dokumen sangat besar | Word merender ulang dokumen tiga kali, yaitu satu kali untuk analisis dan dua kali untuk pembentukan hasil. Ini normal. Tombol `Cancel` tetap berfungsi |
-| `Ruang disk tidak mencukupi` | Sediakan ruang minimal empat kali ukuran dokumen pada *volume* tujuan |
-| Proses Word tertinggal di Task Manager | Tutup aplikasi secara normal. Instance Word yang dibuat aplikasi ini selalu ditutup pada akhir setiap operasi, termasuk saat terjadi kegagalan |
+| "Microsoft Word tidak dapat dijalankan" | Word belum terpasang, versi Store/web, atau belum aktif. Buka Word sekali secara manual untuk menyelesaikan aktivasi |
+| "Microsoft Word berhenti karena menampilkan pesan (…)" | Word meminta sesuatu, misalnya pemulihan dokumen atau persetujuan lisensi. Buka dokumen di Word sendiri, jawab pesannya, lalu coba lagi |
+| "File ini dilindungi kata sandi…" | Hapus kata sandi di Word (*File › Info › Protect Document*) atau simpan ulang sebagai `.docx` |
+| "Dokumen ini dibatasi dari pengeditan" | Matikan *Tinjau › Batasi Pengeditan* di Word |
+| Jumlah halaman berbeda dari tampilan Word Anda | *Printer driver* atau *font* berbeda. Pakai komputer yang sama dengan yang dipakai untuk melihat nomor halaman |
+| "WordSplitter tidak dapat menyimpan di folder ini" | Pilih folder lain lewat **Ubah…**, atau izinkan WordSplitter di *Windows Security › Controlled folder access* |
+| Ruang disk tidak cukup | Sediakan sekitar lima kali ukuran dokumen di drive sistem dan drive tujuan |
 
 ---
 
-## 10. Struktur proyek
+## 14. Struktur proyek
 
 ```
 WordSplitter/
 ├── src/
-│   ├── main.py            entry point, logging, global exception hook, DPI
-│   ├── gui.py             antarmuka Tkinter, worker thread, dialog konflik
-│   ├── word_engine.py     lapisan COM Microsoft Word
-│   ├── split_engine.py    orkestrasi, staged commit, validasi hasil, rollback
-│   ├── validation.py      aturan input, nama file, aritmetika titik pisah
-│   ├── utils.py           inspeksi file, integritas paket docx, temporary path
-│   └── logger.py          logging berotasi
-├── tests/
-│   ├── test_core.py       42 pengujian logika murni
-│   └── test_split_flow.py 18 pengujian orkestrasi dengan simulasi sesi Word
-├── requirements.txt
+│   ├── main.py           titik masuk: jendela, --worker, --check
+│   ├── gui.py            antarmuka Tk: tiga langkah, pratinjau, dialog, Panduan, RTL
+│   ├── jobs.py           sisi jendela dari protokol worker (spawn, kejadian, batal)
+│   ├── worker.py         proses worker: menjalankan tugas, melaporkan JSON
+│   ├── split_engine.py   alur analisis dan pemisahan, commit transaksional
+│   ├── word_engine.py    lapisan COM: sesi Word, watchdog, retry, algoritma potong
+│   ├── winsys.py         ctypes: Job Object, jendela, Recycle Bin, DPI, tema Windows
+│   ├── validation.py     aturan input dan aritmetika titik potong
+│   ├── utils.py          pemeriksaan .docx, sidik jari, salin atomik, folder kerja
+│   ├── i18n.py           30 bahasa, font per aksara, arah teks
+│   ├── theme.py          tema terang dan gelap di atas ttk "clam"
+│   ├── settings.py       preferensi bahasa, tema, folder terakhir
+│   ├── sample_doc.py     pembuat dokumen latihan untuk Panduan
+│   ├── errors.py         kesalahan berbasis kunci bahasa
+│   ├── logger.py         log berotasi per proses
+│   ├── app_info.py       nama dan versi
+│   └── locales/          30 berkas bahasa (JSON)
+├── tests/                pengujian otomatis (lihat bagian 12)
+├── samples/              dokumen dummy skenario (lihat bagian 4)
+├── tools/                alat pengembang: sampel, ikon, tangkapan layar
+├── assets/               ikon aplikasi
+├── docs/                 tangkapan layar untuk README
+├── packaging/            informasi versi untuk exe
 ├── build.bat
+├── requirements.txt
 ├── README.md
-├── TEST_PLAN.md
-└── dist/
-    └── WordSplitter.exe   dihasilkan oleh build.bat
+└── TEST_PLAN.md
 ```
 
-Ketergantungan antar modul bersifat satu arah, yaitu `main` → `gui` → `split_engine` → `word_engine`, dengan `validation`, `utils`, dan `logger` sebagai lapisan dasar tanpa ketergantungan pada Word maupun GUI. Susunan ini yang memungkinkan seluruh aturan validasi dan seluruh protokol orkestrasi diuji tanpa Microsoft Word.
+Arah ketergantungan satu jalur: `main → gui → jobs → (proses lain) worker → split_engine → word_engine`. `validation`, `utils`, `errors`, `i18n`, dan `winsys` adalah lapisan dasar tanpa ketergantungan pada Word maupun antarmuka, sehingga semua aturan dapat diuji tanpa Microsoft Word.
+
+---
+
+## Lisensi
+
+[MIT](LICENSE) © 2026 Ibnu Khoirul Anwar (NuRichter)
