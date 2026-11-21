@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+*.spec
+
+# Downloaded releases and local scratch
+releases/
+*.log
+~$*.docx
+~wordsplitter-*
